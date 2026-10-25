@@ -1,20 +1,45 @@
 package com.saas.billing;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.commons.mail.SimpleEmail;
+import java.util.Objects;
+import java.util.Optional;
 
 public class SubscriptionBillingService {
 
-    private static final String DB_URL = "jdbc:postgresql://localhost:5432/saas_db";
-    private static final String DB_USER = "admin";
-    private static final String DB_PASS = "admin123";
+    private final CustomerRepository customers;
+    private final InvoiceRepository invoices;
+    private final PaymentGateway paymentGateway;
+    private final NotificationService notifications;
+    private final Clock clock;
+
+    public SubscriptionBillingService(CustomerRepository customers, InvoiceRepository invoices,
+                                      PaymentGateway paymentGateway, NotificationService notifications,
+                                      Clock clock) {
+        this.customers = Objects.requireNonNull(customers, "customers");
+        this.invoices = Objects.requireNonNull(invoices, "invoices");
+        this.paymentGateway = Objects.requireNonNull(paymentGateway, "paymentGateway");
+        this.notifications = Objects.requireNonNull(notifications, "notifications");
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /**
+     * Construtor antigo, mantido para não quebrar quem fazia {@code new SubscriptionBillingService()}.
+     * Monta as implementações reais com a configuração lida do ambiente.
+     */
+    @Deprecated
+    public SubscriptionBillingService() {
+        this(DatabaseConfig.fromEnvironment(), SmtpConfig.fromEnvironment());
+    }
+
+    private SubscriptionBillingService(DatabaseConfig db, SmtpConfig smtp) {
+        this(new JdbcCustomerRepository(db), new JdbcInvoiceRepository(db),
+                new StubPaymentGateway(), new CommonsEmailNotificationService(smtp),
+                Clock.systemDefaultZone());
+    }
 
     /**
      * Assinatura antiga, mantida para não quebrar quem já chama o serviço.
@@ -34,7 +59,7 @@ public class SubscriptionBillingService {
         List<String> logs = new ArrayList<>();
 
         LocalDate signupDate = command.signupDate();
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(clock);
 
         int monthsActive = (today.getYear() - signupDate.getYear()) * 12 + (today.getMonthValue() - signupDate.getMonthValue());
 
@@ -69,49 +94,31 @@ public class SubscriptionBillingService {
         calculatedPrice = calculatedPrice.atLeastZero().rounded();
 
         String customerId = command.customerId();
-        String paymentCardToken = command.paymentCardToken();
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
-            String sqlCustomer = "SELECT email, status FROM customers WHERE id = ?";
-            PreparedStatement stmt = conn.prepareStatement(sqlCustomer);
-            stmt.setString(1, customerId);
-            ResultSet rs = stmt.executeQuery();
-
-            if (rs.next()) {
-                String email = rs.getString("email");
-                String status = rs.getString("status");
-
-                if (!"ACTIVE".equalsIgnoreCase(status)) {
-                    logs.add("Cliente inativo. Cobrança cancelada: " + customerId);
-                    return logs;
-                }
-
-                boolean paymentSuccess = false;
-                if (paymentCardToken != null && paymentCardToken.startsWith("tok_")) {
-                    paymentSuccess = true;
-                    logs.add("Pagamento processado com sucesso: R$ " + calculatedPrice);
-                } else {
-                    logs.add("Falha no pagamento do cartão para: " + customerId);
-                }
-
-                String sqlInvoice = "INSERT INTO invoices(customer_id, amount, status, created_at) VALUES (?, ?, ?, NOW())";
-                PreparedStatement stmtInvoice = conn.prepareStatement(sqlInvoice);
-                stmtInvoice.setString(1, customerId);
-                stmtInvoice.setBigDecimal(2, calculatedPrice.amount());
-                stmtInvoice.setString(3, paymentSuccess ? "PAID" : "FAILED");
-                stmtInvoice.executeUpdate();
-
-                SimpleEmail emailSender = new SimpleEmail();
-                emailSender.setHostName("smtp.empresa.com");
-                emailSender.setSmtpPort(587);
-                emailSender.setFrom("billing@empresa.com");
-                emailSender.setSubject("Sua Fatura Mensal");
-                emailSender.setMsg("Olá! Sua fatura foi processada no valor de R$ " + calculatedPrice);
-                emailSender.addTo(email);
-                // emailSender.send();
-
-                logs.add("E-mail disparado para: " + email);
+        try {
+            Optional<Customer> found = customers.findById(customerId);
+            if (found.isEmpty()) {
+                return logs;
             }
+            Customer customer = found.get();
+
+            if (!customer.isActive()) {
+                logs.add("Cliente inativo. Cobrança cancelada: " + customerId);
+                return logs;
+            }
+
+            boolean paymentSuccess = paymentGateway.charge(command.paymentCardToken(), calculatedPrice);
+            if (paymentSuccess) {
+                logs.add("Pagamento processado com sucesso: R$ " + calculatedPrice);
+            } else {
+                logs.add("Falha no pagamento do cartão para: " + customerId);
+            }
+
+            invoices.save(customerId, calculatedPrice,
+                    paymentSuccess ? InvoiceRepository.Status.PAID : InvoiceRepository.Status.FAILED);
+
+            notifications.sendInvoiceProcessed(customer.email(), calculatedPrice);
+            logs.add("E-mail disparado para: " + customer.email());
         } catch (Exception e) {
             logs.add("Erro fatal no processamento: " + e.getMessage());
         }
