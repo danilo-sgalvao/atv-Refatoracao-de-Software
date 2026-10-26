@@ -1,12 +1,10 @@
 package com.saas.billing;
 
-import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 public class SubscriptionBillingService {
 
@@ -15,6 +13,7 @@ public class SubscriptionBillingService {
     private final PaymentGateway paymentGateway;
     private final NotificationService notifications;
     private final Clock clock;
+    private final PricingCalculator pricing = new PricingCalculator();
 
     public SubscriptionBillingService(CustomerRepository customers, InvoiceRepository invoices,
                                       PaymentGateway paymentGateway, NotificationService notifications,
@@ -54,75 +53,33 @@ public class SubscriptionBillingService {
                 overdueDays, promoCode, isNonProfit, paymentCardToken));
     }
 
+    /**
+     * Fachada da cobrança mensal: calcula o preço e, se o cliente existir,
+     * cobra, grava a fatura e avisa. Cliente inexistente não gera nada, como no legado.
+     */
     public List<String> processMonthlyBilling(BillingCommand command) {
-
         List<String> logs = new ArrayList<>();
-
-        LocalDate signupDate = command.signupDate();
-        LocalDate today = LocalDate.now(clock);
-
-        int monthsActive = (today.getYear() - signupDate.getYear()) * 12 + (today.getMonthValue() - signupDate.getMonthValue());
-
-        Money basePrice = command.basePrice();
-        Money calculatedPrice = basePrice;
-
-        if (monthsActive > 24) {
-            calculatedPrice = calculatedPrice.minus(basePrice.times(new BigDecimal("0.15"))); // 15% após 2 anos
-        } else if (monthsActive > 12) {
-            calculatedPrice = calculatedPrice.minus(basePrice.times(new BigDecimal("0.10"))); // 10% após 1 ano
-        }
-
-        if (command.nonProfit()) {
-            calculatedPrice = calculatedPrice.times(new BigDecimal("0.70")); // 30% off para ONGs
-        }
-
-        if (command.hasPromoCode()) {
-            String promoCode = command.promoCode();
-            if (promoCode.equalsIgnoreCase("BLACKFRIDAY") && today.getMonthValue() == 11) {
-                calculatedPrice = calculatedPrice.minus(Money.of("30.00"));
-            } else if (promoCode.equalsIgnoreCase("WELCOME10") && monthsActive <= 1) {
-                calculatedPrice = calculatedPrice.times(new BigDecimal("0.90"));
-            }
-        }
-
-        if (command.isOverdue()) {
-            Money penalty = calculatedPrice.times(new BigDecimal("0.02"));
-            Money dailyInterest = calculatedPrice.times(new BigDecimal("0.001")).times(command.overdueDays());
-            calculatedPrice = calculatedPrice.plus(penalty).plus(dailyInterest);
-        }
-
-        calculatedPrice = calculatedPrice.atLeastZero().rounded();
-
-        String customerId = command.customerId();
-
+        Money amount = pricing.calculate(command, LocalDate.now(clock));
         try {
-            Optional<Customer> found = customers.findById(customerId);
-            if (found.isEmpty()) {
-                return logs;
-            }
-            Customer customer = found.get();
-
-            if (!customer.isActive()) {
-                logs.add("Cliente inativo. Cobrança cancelada: " + customerId);
-                return logs;
-            }
-
-            boolean paymentSuccess = paymentGateway.charge(command.paymentCardToken(), calculatedPrice);
-            if (paymentSuccess) {
-                logs.add("Pagamento processado com sucesso: R$ " + calculatedPrice);
-            } else {
-                logs.add("Falha no pagamento do cartão para: " + customerId);
-            }
-
-            invoices.save(customerId, calculatedPrice,
-                    paymentSuccess ? InvoiceRepository.Status.PAID : InvoiceRepository.Status.FAILED);
-
-            notifications.sendInvoiceProcessed(customer.email(), calculatedPrice);
-            logs.add("E-mail disparado para: " + customer.email());
+            customers.findById(command.customerId())
+                    .ifPresent(customer -> bill(customer, command.paymentCardToken(), amount, logs));
         } catch (Exception e) {
             logs.add("Erro fatal no processamento: " + e.getMessage());
         }
-
         return logs;
+    }
+
+    private void bill(Customer customer, String cardToken, Money amount, List<String> logs) {
+        if (!customer.isActive()) {
+            logs.add("Cliente inativo. Cobrança cancelada: " + customer.id());
+            return;
+        }
+        boolean paid = paymentGateway.charge(cardToken, amount);
+        logs.add(paid
+                ? "Pagamento processado com sucesso: R$ " + amount
+                : "Falha no pagamento do cartão para: " + customer.id());
+        invoices.save(customer.id(), amount, paid ? InvoiceRepository.Status.PAID : InvoiceRepository.Status.FAILED);
+        notifications.sendInvoiceProcessed(customer.email(), amount);
+        logs.add("E-mail disparado para: " + customer.email());
     }
 }
