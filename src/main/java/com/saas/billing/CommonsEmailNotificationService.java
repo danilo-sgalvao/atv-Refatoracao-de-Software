@@ -27,7 +27,7 @@ public class CommonsEmailNotificationService implements NotificationService {
             message.setSubject(SUBJECT);
             message.setMsg("Olá! Sua fatura foi processada no valor de R$ " + amount);
             message.addTo(email);
-            // message.send(); // desligado no legado; comportamento mantido nesta refatoração
+            message.send();
         } catch (EmailException e) {
             throw new InfrastructureException(e);
         }

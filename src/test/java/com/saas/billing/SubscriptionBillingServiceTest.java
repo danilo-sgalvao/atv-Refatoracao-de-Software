@@ -1,6 +1,7 @@
 package com.saas.billing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.saas.billing.FakeNotificationService.Notification;
@@ -101,6 +102,35 @@ class SubscriptionBillingServiceTest {
         List<String> logs = service.processMonthlyBilling(cobranca("c1", null));
 
         assertEquals(List.of("Erro fatal no processamento: conexão recusada"), logs);
+    }
+
+    @Test
+    void falhaAoGravarFaturaDepoisDoPagamentoFicaRegistradaNoLog() {
+        InvoiceRepository bancoForaDoAr = (customerId, amount, status) -> {
+            throw new InfrastructureException(new SQLException("timeout"));
+        };
+        SubscriptionBillingService service = new SubscriptionBillingService(
+                customers, bancoForaDoAr, FakePaymentGateway.approving(), notifications, fixedAt(JUNHO));
+
+        List<String> logs = service.processMonthlyBilling(cobranca("c1", null));
+
+        assertEquals(List.of(
+                "Pagamento processado com sucesso: R$ 100.00",
+                "Erro fatal no processamento: timeout"), logs);
+        assertTrue(notifications.sent().isEmpty());
+    }
+
+    @Test
+    void erroQueNaoEDeInfraestruturaNaoESilenciado() {
+        PaymentGateway comBug = (token, amount) -> {
+            throw new IllegalStateException("bug no gateway");
+        };
+        SubscriptionBillingService service = new SubscriptionBillingService(
+                customers, invoices, comBug, notifications, fixedAt(JUNHO));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> service.processMonthlyBilling(cobranca("c1", null)));
+        assertEquals("bug no gateway", e.getMessage());
     }
 
     @Test

@@ -63,7 +63,7 @@ public class SubscriptionBillingService {
         try {
             customers.findById(command.customerId())
                     .ifPresent(customer -> bill(customer, command.paymentCardToken(), amount, logs));
-        } catch (Exception e) {
+        } catch (InfrastructureException e) {
             logs.add("Erro fatal no processamento: " + e.getMessage());
         }
         return logs;
