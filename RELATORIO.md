@@ -2,7 +2,7 @@
 
 Implantação e Entrega de Software — 2026/2 · Prof.ª Sofia Costa Paiva
 
-**Dupla:** Danilo Galvão (@danilo-sgalvao) · Gabriel Tessarolo
+**Dupla:** Danilo Galvão (@danilo-sgalvao) · Gabriel Tessarolo (@gthUFG)
 
 As linhas citadas se referem ao código legado do **commit 1** (`219b098`), em
 `src/main/java/com/saas/billing/SubscriptionBillingService.java`.
